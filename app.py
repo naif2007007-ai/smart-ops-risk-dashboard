@@ -7,38 +7,90 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import confusion_matrix
 
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # -----------------------------
-# 1. Page config
+# 1. Page config & basic style
 # -----------------------------
 st.set_page_config(
-    page_title="Smart IT Operations – Predictive Risk Dashboard",
+    page_title="AI Early Warning – Smart IT Operations",
     layout="wide"
 )
 
-st.title("Smart IT Operations – AI Predictive Risk Dashboard (PoC)")
+# Simple CSS for cards + blinking alert
 st.markdown(
     """
-    This dashboard simulates an Aramco-style **LAN / Backbone / Facility** environment using synthetic data.
-    The AI model predicts the risk of failure in the next 7 days and prioritizes devices based on their risk.
+    <style>
+    .kpi-card {
+        padding: 1rem 1.5rem;
+        border-radius: 0.7rem;
+        margin-bottom: 0.7rem;
+        background-color: #1f2933;
+        border: 1px solid #374151;
+    }
+    .kpi-title {
+        font-size: 0.9rem;
+        color: #9CA3AF;
+        margin-bottom: 0.1rem;
+    }
+    .kpi-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #F9FAFB;
+    }
+    .kpi-sub {
+        font-size: 0.8rem;
+        color: #9CA3AF;
+    }
+    .status-ok {
+        border-left: 6px solid #10B981;
+    }
+    .status-warn {
+        border-left: 6px solid #F59E0B;
+    }
+    .status-crit {
+        border-left: 6px solid #EF4444;
+    }
+    @keyframes blinker {
+        50% { opacity: 0.25; }
+    }
+    .blink {
+        animation: blinker 1s linear infinite;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# -----------------------------
+# 2. Title & description
+# -----------------------------
+st.title("AI Early Warning – Smart IT Operations Dashboard")
+
+st.markdown(
+    """
+    **Purpose:** This dashboard is **not** a live monitoring tool like Netcool.  
+    It is an **AI engine** that analyzes historical behavior of LAN, Backbone, and Facility devices to  
+    **predict the risk of failure in the next 7 days** and **prioritize devices and sites** based on that risk.
+
+    The current Proof of Concept uses synthetic data but the design is scalable to real Aramco data sources (Netcool, Remedy, facility monitoring, etc.).
     """
 )
 
 # -----------------------------
-# 2. Load data (cached)
+# 3. Load data
 # -----------------------------
 @st.cache_data
 def load_data():
-    # Make sure smart_ops_synthetic.csv is in the same folder as app.py in GitHub
     df = pd.read_csv("smart_ops_synthetic.csv", parse_dates=["timestamp"])
     return df
 
 df = load_data()
 
-# Sidebar filters
+# -----------------------------
+# 4. Sidebar filters
+# -----------------------------
 st.sidebar.header("Filters")
 
 group_filter = st.sidebar.multiselect(
@@ -65,35 +117,31 @@ test_size = st.sidebar.slider(
 )
 
 n_estimators = st.sidebar.slider(
-    "RandomForest trees (n_estimators)",
+    "RandomForest trees (model complexity)",
     50, 400, 200, 50
 )
 
 random_state = 42
 
-# Apply filters
 df_filtered = df[
     df["group"].isin(group_filter)
     & df["site"].isin(site_filter)
     & df["criticality"].isin(criticality_filter)
 ].copy()
 
-st.markdown(f"**Filtered records:** {len(df_filtered):,}")
+st.markdown(f"**Filtered records in AI model scope:** {len(df_filtered):,}")
 
 if len(df_filtered) < 500:
-    st.warning("Filtered dataset is quite small. Consider selecting more groups/sites/criticality levels for a stronger model.")
+    st.warning("Filtered dataset is quite small. Consider including more groups/sites/criticality levels for a stronger AI model.")
 
 # -----------------------------
-# 3. Preprocess & train model
+# 5. Train model & build risk table
 # -----------------------------
 @st.cache_resource
 def train_model(df_in, test_size, n_estimators, random_state):
     df_model = df_in.copy()
-
-    # Target
     y = df_model["failure_next_7d"].astype(int)
 
-    # Features to use
     feature_cols = [
         "cpu_util",
         "interface_errors",
@@ -109,13 +157,11 @@ def train_model(df_in, test_size, n_estimators, random_state):
 
     X = df_model[feature_cols].copy()
 
-    # Handle missing numeric values
     num_cols = ["cpu_util", "interface_errors", "optical_power_dbm",
                 "battery_voltage", "load_percent", "temperature_c"]
     for col in num_cols:
         X[col] = X[col].fillna(X[col].median())
 
-    # One-hot encode categorical features
     X = pd.get_dummies(
         X,
         columns=["group", "device_type", "site", "criticality"],
@@ -126,7 +172,6 @@ def train_model(df_in, test_size, n_estimators, random_state):
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
 
-    # Scale numeric columns
     scaler = StandardScaler()
     X_train[num_cols] = scaler.fit_transform(X_train[num_cols])
     X_test[num_cols] = scaler.transform(X_test[num_cols])
@@ -155,8 +200,6 @@ def train_model(df_in, test_size, n_estimators, random_state):
         "n_test": len(X_test)
     }
 
-    # Build risk table on test set
-    # Use .loc to align with original df indices
     risk_table = df_in.loc[y_test.index].copy()
     risk_table["Failure_Probability"] = y_proba
     risk_table["Predicted_Failure"] = y_pred
@@ -174,7 +217,6 @@ def train_model(df_in, test_size, n_estimators, random_state):
 
     risk_table["Risk_Level"] = risk_table["Risk_Score"].apply(risk_band)
 
-    # Feature importance
     importance_df = pd.DataFrame({
         "Feature": X_train.columns,
         "Importance": model.feature_importances_
@@ -187,27 +229,115 @@ model, risk_table, importance_df, metrics = train_model(
 )
 
 # -----------------------------
-# 4. Top-level KPIs for management
+# 6. AI Early Warning Panel
 # -----------------------------
 total_devices = df_filtered["device_id"].nunique()
-high_risk_devices = risk_table[risk_table["Risk_Level"].isin(["Critical", "High"])]["device_id"].nunique()
+critical_df = risk_table[risk_table["Risk_Level"] == "Critical"]
+high_df = risk_table[risk_table["Risk_Level"] == "High"]
+medium_df = risk_table[risk_table["Risk_Level"] == "Medium"]
+
+crit_devices = critical_df["device_id"].nunique()
+high_devices = high_df["device_id"].nunique()
+med_devices = medium_df["device_id"].nunique()
+
+predicted_failures = int((risk_table["Predicted_Failure"] == 1).sum())
+sites_at_risk = risk_table[risk_table["Risk_Level"].isin(["Critical", "High"])]["site"].nunique()
 overall_failure_rate = df_filtered["failure_next_7d"].mean() * 100
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Devices in scope", f"{total_devices:,}")
-col2.metric("High/Critical risk devices", f"{high_risk_devices:,}")
-col3.metric("Historical failure rate", f"{overall_failure_rate:.1f}%")
-col4.metric("Model recall (failures)", f"{metrics['recall']*100:.1f}%")
+col_alert, col_empty = st.columns([2, 3])
+
+with col_alert:
+    if crit_devices > 0:
+        st.markdown(
+            f"""
+            <div class="kpi-card status-crit blink">
+                <div class="kpi-title">AI Early Warning</div>
+                <div class="kpi-value">⚠ {crit_devices} CRITICAL device(s)</div>
+                <div class="kpi-sub">
+                    Predicted to have a high probability of failure in the next 7 days.  
+                    Recommended action: review with LAN / Backbone / Facility teams.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            """
+            <div class="kpi-card status-ok">
+                <div class="kpi-title">AI Early Warning</div>
+                <div class="kpi-value">✅ No Critical AI risks detected</div>
+                <div class="kpi-sub">
+                    One or more devices may still be at High/Medium risk – see details below.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+# KPIs row
+k1, k2, k3, k4 = st.columns(4)
+
+with k1:
+    st.markdown(
+        f"""
+        <div class="kpi-card status-ok">
+            <div class="kpi-title">Devices in AI scope</div>
+            <div class="kpi-value">{total_devices:,}</div>
+            <div class="kpi-sub">Based on selected groups/sites/criticality</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with k2:
+    st.markdown(
+        f"""
+        <div class="kpi-card status-warn">
+            <div class="kpi-title">Predicted failures (next 7 days)</div>
+            <div class="kpi-value">{predicted_failures}</div>
+            <div class="kpi-sub">Devices where AI predicts a failure event</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with k3:
+    high_crit_pct = 0
+    if total_devices > 0:
+        high_crit_pct = (crit_devices + high_devices) / total_devices * 100
+    st.markdown(
+        f"""
+        <div class="kpi-card status-crit">
+            <div class="kpi-title">Devices at High/Critical AI risk</div>
+            <div class="kpi-value">{high_crit_pct:.1f}%</div>
+            <div class="kpi-sub">{crit_devices} Critical, {high_devices} High</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with k4:
+    st.markdown(
+        f"""
+        <div class="kpi-card status-ok">
+            <div class="kpi-title">Model recall (failure detection)</div>
+            <div class="kpi-value">{metrics['recall']*100:.1f}%</div>
+            <div class="kpi-sub">Share of historical failures that the AI model captures</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 st.markdown("---")
 
 # -----------------------------
-# 5. One-page dashboard layout
+# 7. Risk distribution & feature importance
 # -----------------------------
 risk_counts = risk_table["Risk_Level"].value_counts().reset_index()
 risk_counts.columns = ["Risk_Level", "Count"]
 
-top_imp = importance_df.head(15).sort_values(by="Importance", ascending=True)
+top_imp = importance_df.head(12).sort_values(by="Importance", ascending=True)
 
 top10 = (
     risk_table
@@ -222,9 +352,9 @@ fig = make_subplots(
     specs=[[{"type": "domain"}, {"type": "xy"}],
            [{"type": "xy"}, {"type": "table"}]],
     subplot_titles=(
-        "Risk Levels (AI-assessed)",
-        "Risk Score Distribution",
-        "Top Drivers of Failure (Feature Importance)",
+        "AI Risk Levels (Critical / High / Medium / Low)",
+        "Distribution of AI Risk Scores",
+        "Top Drivers of AI Failure Risk",
         "Top 10 Highest-Risk Devices (Next 7 Days)"
     )
 )
@@ -262,7 +392,7 @@ fig.add_trace(
 fig.add_trace(
     go.Table(
         header=dict(
-            values=["#", "Device", "Group", "Site", "Risk Level", "Risk Score", "Fail Prob.", "Actual Fail?"],
+            values=["#", "Device", "Group", "Site", "Risk Level", "Risk Score", "Fail Prob.", "Actual Failure?"],
             fill_color="lightgrey",
             align="center"
         ),
@@ -296,16 +426,16 @@ fig.update_yaxes(title_text="Feature", row=2, col=1)
 st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
-# 6. Detailed views
+# 8. Expandable detailed sections
 # -----------------------------
-st.markdown("### Detailed Risk Table (filtered scope)")
-st.dataframe(
-    risk_table.sort_values(by="Risk_Score", ascending=False).reset_index(drop=True),
-    use_container_width=True
-)
+with st.expander("🔍 Detailed AI risk table (for engineers)"):
+    st.dataframe(
+        risk_table.sort_values(by="Risk_Score", ascending=False).reset_index(drop=True),
+        use_container_width=True
+    )
 
-st.markdown("### Raw Data Sample")
-st.dataframe(
-    df_filtered.head(100),
-    use_container_width=True
-)
+with st.expander("📊 Raw data sample (synthetic PoC data)"):
+    st.dataframe(
+        df_filtered.head(200),
+        use_container_width=True
+    )
